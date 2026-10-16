@@ -7,12 +7,14 @@ import {
   BrainCircuit,
   CheckCircle2,
   CircleStop,
+  Loader2,
   Mic,
   MicOff,
   Radio,
   ShieldCheck,
   Volume2,
   Waves,
+  AlertCircle,
 } from "lucide-react";
 
 type SpeechRecognitionAlternative = {
@@ -54,6 +56,14 @@ declare global {
   }
 }
 
+type DetectedQuestion = {
+  id: string;
+  question: string;
+  answer: string;
+  loading: boolean;
+  error: string;
+};
+
 export default function InterviewPage() {
   const [listening, setListening] = useState(false);
   const [supported, setSupported] = useState(true);
@@ -61,14 +71,126 @@ export default function InterviewPage() {
   const [currentSpeech, setCurrentSpeech] = useState("");
   const [status, setStatus] = useState("Ready to start");
   const [error, setError] = useState("");
-  const [questions, setQuestions] = useState<string[]>([]);
+  const [questions, setQuestions] = useState<DetectedQuestion[]>([]);
 
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
   const listeningRef = useRef(false);
-  const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastQuestionRef = useRef("");
+  const restartTimerRef =
+    useRef<ReturnType<typeof setTimeout> | null>(null);
+  const questionTimerRef =
+    useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const questionBufferRef = useRef("");
   const processedRef = useRef(new Set<string>());
+
+  // Generate an answer using your server-side API.
+  // The API key stays on the server, not in this browser component.
+  async function generateAnswer(question: string, id: string) {
+    try {
+      const response = await fetch("/api/generate-answer", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ question }),
+      });
+
+      const data: {
+        answer?: string;
+        error?: string;
+      } = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.error || `Request failed (${response.status})`
+        );
+      }
+
+      if (!data.answer) {
+        throw new Error("The AI returned an empty answer.");
+      }
+
+      setQuestions((previous) =>
+        previous.map((item) =>
+          item.id === id
+            ? {
+                ...item,
+                answer: data.answer!,
+                loading: false,
+                error: "",
+              }
+            : item
+        )
+      );
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : "Could not generate an answer. Please try again.";
+
+      setQuestions((previous) =>
+        previous.map((item) =>
+          item.id === id
+            ? {
+                ...item,
+                loading: false,
+                error: message,
+              }
+            : item
+        )
+      );
+    }
+  }
+
+  // Called after a pause in finalized speech.
+  function processQuestionBuffer() {
+    const question = questionBufferRef.current.trim();
+    questionBufferRef.current = "";
+
+    if (!question) return;
+
+    const words = question.split(/\s+/);
+
+    if (words.length < 4) return;
+
+    const looksLikeQuestion =
+      question.includes("?") ||
+      /\b(what|why|how|when|where|which|who|whom|whose|can you|could you|would you|will you|do you|does|did|is|are|have you|has|explain|tell me|describe|introduce yourself|walk me through|compare|define|discuss|give me|write|solve)\b/i.test(
+        question
+      );
+
+    if (!looksLikeQuestion) return;
+
+    const normalized = question
+      .toLowerCase()
+      .replace(/[^\w\s]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (!normalized || processedRef.current.has(normalized)) {
+      return;
+    }
+
+    // Mark it before making the request to prevent duplicates.
+    processedRef.current.add(normalized);
+
+    const id = normalized;
+
+    setQuestions((previous) =>
+      [
+        {
+          id,
+          question,
+          answer: "",
+          loading: true,
+          error: "",
+        },
+        ...previous,
+      ].slice(0, 10)
+    );
+
+    void generateAnswer(question, id);
+  }
 
   useEffect(() => {
     const SpeechRecognition =
@@ -77,6 +199,9 @@ export default function InterviewPage() {
     if (!SpeechRecognition) {
       setSupported(false);
       setStatus("Speech recognition unavailable");
+      setError(
+        "Your browser does not support the Web Speech API. Try an updated version of Chrome."
+      );
       return;
     }
 
@@ -90,7 +215,11 @@ export default function InterviewPage() {
       let interim = "";
       let finalText = "";
 
-      for (let i = event.resultIndex; i < event.results.length; i++) {
+      for (
+        let i = event.resultIndex;
+        i < event.results.length;
+        i++
+      ) {
         const result = event.results[i];
         const text = result[0].transcript.trim();
 
@@ -101,58 +230,48 @@ export default function InterviewPage() {
         }
       }
 
-      if (finalText) {
-        questionBufferRef.current += " " + finalText.trim();
+      if (finalText.trim()) {
+        const cleanFinalText = finalText.trim();
+
+        questionBufferRef.current += " " + cleanFinalText;
+
         setTranscript((previous) =>
-          (previous + " " + finalText.trim()).trim()
+          (previous + " " + cleanFinalText).trim()
         );
+
+        // Wait for the speaker to pause before deciding whether
+        // the accumulated speech is a question.
+        if (questionTimerRef.current) {
+          clearTimeout(questionTimerRef.current);
+        }
+
+        questionTimerRef.current = setTimeout(() => {
+          processQuestionBuffer();
+        }, 1400);
       }
 
       setCurrentSpeech(interim.trim());
-
-      const buffer = questionBufferRef.current.trim();
-
-      // Prototype question detection: sentence endings or likely
-      // question words. This will be replaced with AI detection.
-      const looksLikeQuestion =
-        /[?]\s*$/.test(buffer) ||
-        /\b(what|why|how|when|where|which|who|can you|could you|explain|tell me|describe)\b/i.test(
-          buffer
-        );
-
-      const hasEnoughWords = buffer.split(/\s+/).length >= 4;
-
-      if (looksLikeQuestion && hasEnoughWords) {
-        const normalized = buffer
-          .toLowerCase()
-          .replace(/[^\w\s]/g, "")
-          .trim();
-
-        if (
-          normalized &&
-          normalized !== lastQuestionRef.current &&
-          !processedRef.current.has(normalized)
-        ) {
-          lastQuestionRef.current = normalized;
-          processedRef.current.add(normalized);
-
-          setQuestions((previous) => [buffer, ...previous].slice(0, 10));
-          questionBufferRef.current = "";
-        }
-      } else if (buffer.split(/\s+/).length > 70) {
-        questionBufferRef.current = "";
-      }
     };
 
     recognition.onerror = (event) => {
-      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+      if (
+        event.error === "not-allowed" ||
+        event.error === "service-not-allowed"
+      ) {
         listeningRef.current = false;
         setListening(false);
         setStatus("Microphone permission required");
-        setError("Allow microphone access in your browser settings.");
+        setError(
+          "Allow microphone access in your browser's site settings."
+        );
       } else if (event.error === "network") {
-        setError("Speech recognition encountered a network error.");
-      } else if (event.error !== "no-speech" && event.error !== "aborted") {
+        setError(
+          "Speech recognition encountered a network error. Check your connection."
+        );
+      } else if (
+        event.error !== "no-speech" &&
+        event.error !== "aborted"
+      ) {
         setError(`Speech recognition error: ${event.error}`);
       }
     };
@@ -160,7 +279,6 @@ export default function InterviewPage() {
     recognition.onend = () => {
       if (!listeningRef.current) return;
 
-      // Some browsers stop recognition automatically.
       if (restartTimerRef.current) {
         clearTimeout(restartTimerRef.current);
       }
@@ -171,7 +289,7 @@ export default function InterviewPage() {
         try {
           recognition.start();
         } catch {
-          // Ignore an already-started recognition instance.
+          // The recognition service may already be starting.
         }
       }, 300);
     };
@@ -185,6 +303,10 @@ export default function InterviewPage() {
         clearTimeout(restartTimerRef.current);
       }
 
+      if (questionTimerRef.current) {
+        clearTimeout(questionTimerRef.current);
+      }
+
       recognition.abort();
       recognitionRef.current = null;
     };
@@ -192,7 +314,9 @@ export default function InterviewPage() {
 
   function startListening() {
     if (!recognitionRef.current) {
-      setError("Speech recognition is not supported in this browser.");
+      setError(
+        "Speech recognition is unavailable. Check your browser."
+      );
       return;
     }
 
@@ -203,7 +327,9 @@ export default function InterviewPage() {
       setStatus("Listening continuously");
       recognitionRef.current.start();
     } catch {
-      setError("Could not start listening. Please try again.");
+      setError(
+        "Could not start listening. Stop any existing session and try again."
+      );
       listeningRef.current = false;
       setListening(false);
     }
@@ -219,7 +345,27 @@ export default function InterviewPage() {
       restartTimerRef.current = null;
     }
 
+    if (questionTimerRef.current) {
+      clearTimeout(questionTimerRef.current);
+      questionTimerRef.current = null;
+    }
+
+    // Process any remaining speech when the user stops.
+    processQuestionBuffer();
+
     recognitionRef.current?.stop();
+  }
+
+  function retryAnswer(item: DetectedQuestion) {
+    setQuestions((previous) =>
+      previous.map((question) =>
+        question.id === item.id
+          ? { ...question, loading: true, error: "" }
+          : question
+      )
+    );
+
+    void generateAnswer(item.question, item.id);
   }
 
   return (
@@ -255,12 +401,14 @@ export default function InterviewPage() {
           <p className="text-sm font-medium text-amber-400">
             LIVE AUDIO SESSION
           </p>
+
           <h1 className="mt-3 text-3xl font-bold sm:text-4xl">
             Interview workspace
           </h1>
+
           <p className="mt-3 max-w-2xl text-sm leading-6 text-zinc-400 sm:text-base">
-            Start listening to transcribe speech and identify likely
-            interview questions automatically.
+            Transcribe speech, identify likely questions, and generate
+            suggested answers for mock interviews and authorized practice.
           </p>
         </div>
 
@@ -270,6 +418,7 @@ export default function InterviewPage() {
               <div className="rounded-xl bg-amber-400/10 p-3 text-amber-400">
                 <Mic size={23} />
               </div>
+
               <div>
                 <h2 className="font-semibold">Audio controls</h2>
                 <p className="mt-1 text-sm text-zinc-500">{status}</p>
@@ -297,8 +446,8 @@ export default function InterviewPage() {
 
               <p className="mt-2 text-center text-xs leading-5 text-zinc-500">
                 {listening
-                  ? "Speak near your microphone to test transcription."
-                  : "Your browser will ask for microphone permission."}
+                  ? "Speak clearly and pause briefly after a question."
+                  : "Allow microphone access when your browser asks."}
               </p>
             </div>
 
@@ -322,21 +471,24 @@ export default function InterviewPage() {
             )}
 
             {error && (
-              <p role="alert" className="mt-4 text-sm text-red-400">
-                {error}
-              </p>
+              <div
+                role="alert"
+                className="mt-4 flex items-start gap-2 text-sm leading-6 text-red-400"
+              >
+                <AlertCircle size={17} className="mt-1 shrink-0" />
+                <span>{error}</span>
+              </div>
             )}
 
             {!supported && (
               <p className="mt-4 text-sm leading-6 text-zinc-400">
-                This browser does not expose the Web Speech API. We'll add
-                a streaming speech provider for broader compatibility.
+                This browser does not expose the Web Speech API.
               </p>
             )}
 
             <div className="mt-5 flex items-start gap-2 text-xs leading-5 text-zinc-500">
               <ShieldCheck size={16} className="mt-0.5 shrink-0" />
-              Audio processing depends on your browser's speech service.
+              AI requests are sent to your configured server endpoint.
               Get consent before capturing another person's speech.
             </div>
           </section>
@@ -348,7 +500,7 @@ export default function InterviewPage() {
                 <Volume2 size={18} className="text-zinc-500" />
               </div>
 
-              <div className="min-h-36 whitespace-pre-wrap text-sm leading-7 text-zinc-300">
+              <div className="min-h-36 whitespace-pre-wrap break-words text-sm leading-7 text-zinc-300">
                 {transcript || (
                   <span className="text-zinc-600">
                     Recognized speech will appear here automatically...
@@ -365,7 +517,8 @@ export default function InterviewPage() {
 
             <section className="flex-1 rounded-2xl border border-white/10 bg-[#101116] p-5 sm:p-7">
               <div className="mb-5 flex items-center justify-between gap-3">
-                <h2 className="font-semibold">Detected questions</h2>
+                <h2 className="font-semibold">Detected questions & answers</h2>
+
                 <span className="rounded-full bg-white/5 px-3 py-1 text-xs text-zinc-400">
                   {questions.length}
                 </span>
@@ -374,29 +527,80 @@ export default function InterviewPage() {
               {questions.length === 0 ? (
                 <div className="flex min-h-36 flex-col items-center justify-center text-center">
                   <BrainCircuit size={28} className="text-zinc-600" />
+
                   <p className="mt-3 text-sm text-zinc-400">
                     Waiting for a likely question
                   </p>
+
                   <p className="mt-2 max-w-xs text-xs leading-5 text-zinc-600">
-                    Questions detected by this prototype will appear here.
-                    AI answers are the next integration.
+                    When a likely question is detected, the app will request
+                    a suggested answer from your AI backend.
                   </p>
                 </div>
               ) : (
-                <div className="space-y-3">
-                  {questions.map((question, index) => (
-                    <div
-                      key={`${question}-${index}`}
-                      className="flex gap-3 rounded-xl border border-white/5 bg-black/20 p-4"
+                <div className="space-y-4">
+                  {questions.map((item) => (
+                    <article
+                      key={item.id}
+                      className="rounded-xl border border-white/10 bg-black/20 p-4 sm:p-5"
                     >
-                      <CheckCircle2
-                        size={18}
-                        className="mt-0.5 shrink-0 text-amber-400"
-                      />
-                      <p className="text-sm leading-6 text-zinc-300">
-                        {question}
-                      </p>
-                    </div>
+                      <div className="flex items-start gap-3">
+                        <CheckCircle2
+                          size={18}
+                          className="mt-1 shrink-0 text-amber-400"
+                        />
+
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs font-semibold uppercase tracking-wider text-amber-400">
+                            Detected question
+                          </p>
+
+                          <p className="mt-2 break-words text-sm leading-6 text-zinc-200">
+                            {item.question}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="mt-4 border-t border-white/10 pt-4">
+                        <div className="flex items-center gap-2">
+                          <BrainCircuit
+                            size={17}
+                            className="shrink-0 text-amber-400"
+                          />
+
+                          <h3 className="text-sm font-semibold">
+                            Suggested answer
+                          </h3>
+                        </div>
+
+                        {item.loading ? (
+                          <div className="mt-4 flex items-center gap-3 text-sm text-zinc-400">
+                            <Loader2
+                              size={18}
+                              className="animate-spin text-amber-400"
+                            />
+                            Generating your answer...
+                          </div>
+                        ) : item.error ? (
+                          <div className="mt-3">
+                            <p className="text-sm leading-6 text-red-400">
+                              {item.error}
+                            </p>
+
+                            <button
+                              onClick={() => retryAnswer(item)}
+                              className="mt-3 rounded-lg border border-amber-400/30 px-4 py-2 text-sm font-medium text-amber-300 hover:bg-amber-400/10"
+                            >
+                              Try again
+                            </button>
+                          </div>
+                        ) : (
+                          <p className="mt-3 whitespace-pre-wrap break-words text-sm leading-7 text-zinc-300">
+                            {item.answer}
+                          </p>
+                        )}
+                      </div>
+                    </article>
                   ))}
                 </div>
               )}

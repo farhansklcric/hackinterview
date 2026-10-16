@@ -1,25 +1,12 @@
 
+import Groq from "groq-sdk";
 import { GoogleGenAI } from "@google/genai";
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
-const MODELS = [
-  "gemini-3.5-flash-lite",
-  "gemini-3.8-flash",
-];
-
 export async function POST(request: Request) {
   try {
-    const apiKey = process.env.GEMINI_API_KEY;
-
-    if (!apiKey) {
-      return NextResponse.json(
-        { error: "GEMINI_API_KEY is missing in Vercel environment variables." },
-        { status: 500 }
-      );
-    }
-
     const body = await request.json();
 
     const question =
@@ -41,56 +28,90 @@ export async function POST(request: Request) {
       );
     }
 
-    const ai = new GoogleGenAI({ apiKey });
-
     const prompt = `
-You are a helpful interview practice coach.
+You are an expert interview practice coach.
 
-Provide a sample answer for this interview practice question:
-
+Answer this interview question:
 ${question}
 
 Instructions:
-- Answer clearly and naturally.
-- For technical questions, explain the key concepts and give a simple example when useful.
-- For behavioral questions, provide a sample response without inventing the user's personal experiences.
-- Keep the answer concise and easy to speak aloud.
-- Do not include unnecessary introductions.
+- Give a technically accurate and clear answer.
+- For coding questions, explain the approach, complexity, and code when useful.
+- For conceptual questions, explain the core idea and give an example.
+- For behavioral questions, do not invent the user's personal experiences.
+- Keep the answer concise, structured, and easy to speak aloud.
 - Return only the suggested answer.
 `;
 
-    let lastError: unknown;
-
-    for (const model of MODELS) {
+    // Try Groq first.
+    if (process.env.GROQ_API_KEY) {
       try {
+        const groq = new Groq({
+          apiKey: process.env.GROQ_API_KEY,
+          timeout: 15000,
+          maxRetries: 0,
+        });
+
+        const result = await groq.chat.completions.create({
+          model: "openai/gpt-oss-120b",
+          messages: [
+            {
+              role: "system",
+              content:
+                "You are a precise, helpful technical interview coach.",
+            },
+            {
+              role: "user",
+              content: prompt,
+            },
+          ],
+          temperature: 0.3,
+          max_tokens: 700,
+        });
+
+        const answer =
+          result.choices[0]?.message?.content?.trim();
+
+        if (answer) {
+          return NextResponse.json({
+            answer,
+            provider: "groq",
+          });
+        }
+      } catch (error) {
+        console.error("Groq request failed:", error);
+      }
+    }
+
+    // Fall back to Gemini if Groq fails.
+    if (process.env.GEMINI_API_KEY) {
+      try {
+        const ai = new GoogleGenAI({
+          apiKey: process.env.GEMINI_API_KEY,
+        });
+
         const result = await ai.models.generateContent({
-          model,
+          model: "gemini-3.8-flash",
           contents: prompt,
-          config: {
-            temperature: 0.5,
-            maxOutputTokens: 500,
-          },
         });
 
         const answer = result.text?.trim();
 
         if (answer) {
-          return NextResponse.json({ answer });
+          return NextResponse.json({
+            answer,
+            provider: "gemini",
+          });
         }
-
-        lastError = new Error("The model returned an empty answer.");
       } catch (error) {
-        lastError = error;
-        console.error(`Gemini model ${model} failed:`, error);
+        console.error("Gemini fallback failed:", error);
       }
     }
-
-    console.error("All Gemini models failed:", lastError);
 
     return NextResponse.json(
       {
         error:
-          "Gemini is temporarily unavailable or your API quota has been reached. Please try again shortly.",
+          "Both AI providers failed. Please try again shortly.",
       },
       { status: 503 }
     );
@@ -98,7 +119,7 @@ Instructions:
     console.error("Answer generation failed:", error);
 
     return NextResponse.json(
-      { error: "Could not generate an answer. Please try again." },
+      { error: "Could not generate an answer." },
       { status: 500 }
     );
   }

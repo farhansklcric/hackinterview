@@ -4,18 +4,24 @@ import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
+const MODELS = [
+  "gemini-3.5-flash-lite",
+  "gemini-3.8-flash",
+];
+
 export async function POST(request: Request) {
   try {
     const apiKey = process.env.GEMINI_API_KEY;
 
     if (!apiKey) {
       return NextResponse.json(
-        { error: "GEMINI_API_KEY is missing from .env.local." },
+        { error: "GEMINI_API_KEY is missing in Vercel environment variables." },
         { status: 500 }
       );
     }
 
     const body = await request.json();
+
     const question =
       typeof body.question === "string"
         ? body.question.trim()
@@ -23,7 +29,7 @@ export async function POST(request: Request) {
 
     if (!question) {
       return NextResponse.json(
-        { error: "Please provide a question." },
+        { error: "Please provide an interview question." },
         { status: 400 }
       );
     }
@@ -37,41 +43,57 @@ export async function POST(request: Request) {
 
     const ai = new GoogleGenAI({ apiKey });
 
-    const result = await ai.interactions.create({
-      model: "gemini-3.8-flash",
-      input: `You are a helpful interview practice coach.
+    const prompt = `
+You are a helpful interview practice coach.
 
-Help the user prepare for an interview in a mock or otherwise
-authorized practice session.
+Provide a sample answer for this interview practice question:
 
-Question:
 ${question}
 
 Instructions:
-- Give a clear, accurate, useful sample answer.
-- Start with the main point, then explain it with relevant details.
-- For technical questions, include the key concepts and a simple example
-  when helpful.
-- For behavioral questions, provide a natural sample response and
-  do not invent personal experiences or achievements for the user.
-- Use concise language that is easy to understand and practice aloud.
-- If the question is ambiguous, state your assumption.
-- Do not claim the user has experience or qualifications that were
-  not provided.
+- Answer clearly and naturally.
+- For technical questions, explain the key concepts and give a simple example when useful.
+- For behavioral questions, provide a sample response without inventing the user's personal experiences.
+- Keep the answer concise and easy to speak aloud.
+- Do not include unnecessary introductions.
+- Return only the suggested answer.
+`;
 
-Return the suggested answer only.`,
-    });
+    let lastError: unknown;
 
-    const answer = result.output_text?.trim();
+    for (const model of MODELS) {
+      try {
+        const result = await ai.models.generateContent({
+          model,
+          contents: prompt,
+          config: {
+            temperature: 0.5,
+            maxOutputTokens: 500,
+          },
+        });
 
-    if (!answer) {
-      return NextResponse.json(
-        { error: "The AI returned an empty answer. Please try again." },
-        { status: 502 }
-      );
+        const answer = result.text?.trim();
+
+        if (answer) {
+          return NextResponse.json({ answer });
+        }
+
+        lastError = new Error("The model returned an empty answer.");
+      } catch (error) {
+        lastError = error;
+        console.error(`Gemini model ${model} failed:`, error);
+      }
     }
 
-    return NextResponse.json({ answer });
+    console.error("All Gemini models failed:", lastError);
+
+    return NextResponse.json(
+      {
+        error:
+          "Gemini is temporarily unavailable or your API quota has been reached. Please try again shortly.",
+      },
+      { status: 503 }
+    );
   } catch (error) {
     console.error("Answer generation failed:", error);
 

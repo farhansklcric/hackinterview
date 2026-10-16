@@ -1,613 +1,372 @@
-
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import {
-  ArrowLeft,
-  BrainCircuit,
-  CheckCircle2,
-  CircleStop,
-  Loader2,
-  Mic,
-  MicOff,
-  Radio,
-  ShieldCheck,
-  Volume2,
-  Waves,
-  AlertCircle,
-} from "lucide-react";
+import { useEffect, useCallback, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 
-type SpeechRecognitionAlternative = {
-  transcript: string;
-};
+/* ------------------------------------------------------------------ */
+/*  HackInterview - Loading Screen                                     */
+/*  Stickman interviewer. Click a body part to crush it.               */
+/*  Blood splash + "F*ck This Rat Sh*t" slams the screen.              */
+/*  All 6 parts destroyed -> auto-redirect to /interview.            */
+/*  Skip button available for the merciful.                            */
+/* ------------------------------------------------------------------ */
 
-type SpeechRecognitionResult = {
-  isFinal: boolean;
-  length: number;
-  [index: number]: SpeechRecognitionAlternative;
-};
+type PartId = "head" | "torso" | "armL" | "armR" | "legL" | "legR";
 
-type SpeechRecognitionEvent = {
-  resultIndex: number;
-  results: {
-    length: number;
-    [index: number]: SpeechRecognitionResult;
-  };
-};
-
-type SpeechRecognitionInstance = {
-  continuous: boolean;
-  interimResults: boolean;
-  lang: string;
-  onresult: ((event: SpeechRecognitionEvent) => void) | null;
-  onerror: ((event: { error: string }) => void) | null;
-  onend: (() => void) | null;
-  start: () => void;
-  stop: () => void;
-  abort: () => void;
-};
-
-type SpeechRecognitionConstructor = new () => SpeechRecognitionInstance;
-
-declare global {
-  interface Window {
-    SpeechRecognition?: SpeechRecognitionConstructor;
-    webkitSpeechRecognition?: SpeechRecognitionConstructor;
-  }
+interface BloodSplat {
+  id: number;
+  x: number; // vw
+  y: number; // vh
+  size: number;
+  delay: number;
+  duration: number;
+  drip: boolean;
 }
 
-type DetectedQuestion = {
-  id: string;
-  question: string;
-  answer: string;
-  loading: boolean;
-  error: string;
+const PART_LABEL: Record<PartId, string> = {
+  head: "HEAD",
+  torso: "CHEST",
+  armL: "LEFT ARM",
+  armR: "RIGHT ARM",
+  legL: "LEFT LEG",
+  legR: "RIGHT LEG",
 };
 
-export default function InterviewPage() {
-  const [listening, setListening] = useState(false);
-  const [supported, setSupported] = useState(true);
-  const [transcript, setTranscript] = useState("");
-  const [currentSpeech, setCurrentSpeech] = useState("");
-  const [status, setStatus] = useState("Ready to start");
-  const [error, setError] = useState("");
-  const [questions, setQuestions] = useState<DetectedQuestion[]>([]);
+const TOTAL_PARTS = 6;
 
-  const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
-  const listeningRef = useRef(false);
-  const restartTimerRef =
-    useRef<ReturnType<typeof setTimeout> | null>(null);
-  const questionTimerRef =
-    useRef<ReturnType<typeof setTimeout> | null>(null);
+export default function LoadingScreen() {
+  const router = useRouter();
 
-  const questionBufferRef = useRef("");
-  const processedRef = useRef(new Set<string>());
+  const [crushed, setCrushed] = useState<Set<PartId>>(new Set());
+  const [splats, setSplats] = useState<BloodSplat[]>([]);
+  const [phrase, setPhrase] = useState(false);
+  const [shake, setShake] = useState(false);
+  const splatId = useRef(0);
 
-  // Generate an answer using your server-side API.
-  // The API key stays on the server, not in this browser component.
-  async function generateAnswer(question: string, id: string) {
-    try {
-      const response = await fetch("/api/generate-answer", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ question }),
-      });
+  const allDead = crushed.size >= TOTAL_PARTS;
 
-      const data: {
-        answer?: string;
-        error?: string;
-      } = await response.json();
-
-      if (!response.ok) {
-        throw new Error(
-          data.error || `Request failed (${response.status})`
-        );
-      }
-
-      if (!data.answer) {
-        throw new Error("The AI returned an empty answer.");
-      }
-
-      setQuestions((previous) =>
-        previous.map((item) =>
-          item.id === id
-            ? {
-                ...item,
-                answer: data.answer!,
-                loading: false,
-                error: "",
-              }
-            : item
-        )
-      );
-    } catch (err) {
-      const message =
-        err instanceof Error
-          ? err.message
-          : "Could not generate an answer. Please try again.";
-
-      setQuestions((previous) =>
-        previous.map((item) =>
-          item.id === id
-            ? {
-                ...item,
-                loading: false,
-                error: message,
-              }
-            : item
-        )
-      );
-    }
-  }
-
-  // Called after a pause in finalized speech.
-  function processQuestionBuffer() {
-    const question = questionBufferRef.current.trim();
-    questionBufferRef.current = "";
-
-    if (!question) return;
-
-    const words = question.split(/\s+/);
-
-    if (words.length < 4) return;
-
-    const looksLikeQuestion =
-      question.includes("?") ||
-      /\b(what|why|how|when|where|which|who|whom|whose|can you|could you|would you|will you|do you|does|did|is|are|have you|has|explain|tell me|describe|introduce yourself|walk me through|compare|define|discuss|give me|write|solve)\b/i.test(
-        question
-      );
-
-    if (!looksLikeQuestion) return;
-
-    const normalized = question
-      .toLowerCase()
-      .replace(/[^\w\s]/g, "")
-      .replace(/\s+/g, " ")
-      .trim();
-
-    if (!normalized || processedRef.current.has(normalized)) {
-      return;
-    }
-
-    // Mark it before making the request to prevent duplicates.
-    processedRef.current.add(normalized);
-
-    const id = normalized;
-
-    setQuestions((previous) =>
-      [
-        {
-          id,
-          question,
-          answer: "",
-          loading: true,
-          error: "",
-        },
-        ...previous,
-      ].slice(0, 10)
-    );
-
-    void generateAnswer(question, id);
-  }
-
+  /* auto-enter the app once every part is destroyed */
   useEffect(() => {
-    const SpeechRecognition =
-      window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!allDead) return;
+    const t = setTimeout(() => router.push("/interview"), 2000);
+    return () => clearTimeout(t);
+  }, [allDead, router]);
 
-    if (!SpeechRecognition) {
-      setSupported(false);
-      setStatus("Speech recognition unavailable");
-      setError(
-        "Your browser does not support the Web Speech API. Try an updated version of Chrome."
-      );
-      return;
-    }
+  const crush = useCallback(
+    (part: PartId) => {
+      if (crushed.has(part)) return;
 
-    const recognition = new SpeechRecognition();
+      setCrushed((prev) => new Set(prev).add(part));
+      setShake(true);
+      setTimeout(() => setShake(false), 500);
 
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = "en-IN";
+      // burst of blood across the whole screen
+      const burst: BloodSplat[] = Array.from({ length: 26 }, () => ({
+        id: splatId.current++,
+        x: Math.random() * 100,
+        y: Math.random() * 100,
+        size: 30 + Math.random() * 140,
+        delay: Math.random() * 0.25,
+        duration: 0.35 + Math.random() * 0.4,
+        drip: Math.random() > 0.5,
+      }));
+      setSplats((prev) => [...prev, ...burst]);
+      setPhrase(true);
+    },
+    [crushed]
+  );
 
-    recognition.onresult = (event) => {
-      let interim = "";
-      let finalText = "";
-
-      for (
-        let i = event.resultIndex;
-        i < event.results.length;
-        i++
-      ) {
-        const result = event.results[i];
-        const text = result[0].transcript.trim();
-
-        if (result.isFinal) {
-          finalText += text + " ";
-        } else {
-          interim += text + " ";
+  const partStyle = (p: PartId) =>
+    crushed.has(p)
+      ? {
+          transform: "scale(0.02) rotate(45deg)",
+          opacity: 0,
+          transition:
+            "transform 0.28s cubic-bezier(.6,-0.3,.7,-0.4), opacity 0.3s",
+          transformOrigin: "center",
+          pointerEvents: "none" as const,
+          cursor: "default" as const,
         }
-      }
-
-      if (finalText.trim()) {
-        const cleanFinalText = finalText.trim();
-
-        questionBufferRef.current += " " + cleanFinalText;
-
-        setTranscript((previous) =>
-          (previous + " " + cleanFinalText).trim()
-        );
-
-        // Wait for the speaker to pause before deciding whether
-        // the accumulated speech is a question.
-        if (questionTimerRef.current) {
-          clearTimeout(questionTimerRef.current);
-        }
-
-        questionTimerRef.current = setTimeout(() => {
-          processQuestionBuffer();
-        }, 1400);
-      }
-
-      setCurrentSpeech(interim.trim());
-    };
-
-    recognition.onerror = (event) => {
-      if (
-        event.error === "not-allowed" ||
-        event.error === "service-not-allowed"
-      ) {
-        listeningRef.current = false;
-        setListening(false);
-        setStatus("Microphone permission required");
-        setError(
-          "Allow microphone access in your browser's site settings."
-        );
-      } else if (event.error === "network") {
-        setError(
-          "Speech recognition encountered a network error. Check your connection."
-        );
-      } else if (
-        event.error !== "no-speech" &&
-        event.error !== "aborted"
-      ) {
-        setError(`Speech recognition error: ${event.error}`);
-      }
-    };
-
-    recognition.onend = () => {
-      if (!listeningRef.current) return;
-
-      if (restartTimerRef.current) {
-        clearTimeout(restartTimerRef.current);
-      }
-
-      restartTimerRef.current = setTimeout(() => {
-        if (!listeningRef.current) return;
-
-        try {
-          recognition.start();
-        } catch {
-          // The recognition service may already be starting.
-        }
-      }, 300);
-    };
-
-    recognitionRef.current = recognition;
-
-    return () => {
-      listeningRef.current = false;
-
-      if (restartTimerRef.current) {
-        clearTimeout(restartTimerRef.current);
-      }
-
-      if (questionTimerRef.current) {
-        clearTimeout(questionTimerRef.current);
-      }
-
-      recognition.abort();
-      recognitionRef.current = null;
-    };
-  }, []);
-
-  function startListening() {
-    if (!recognitionRef.current) {
-      setError(
-        "Speech recognition is unavailable. Check your browser."
-      );
-      return;
-    }
-
-    try {
-      setError("");
-      listeningRef.current = true;
-      setListening(true);
-      setStatus("Listening continuously");
-      recognitionRef.current.start();
-    } catch {
-      setError(
-        "Could not start listening. Stop any existing session and try again."
-      );
-      listeningRef.current = false;
-      setListening(false);
-    }
-  }
-
-  function stopListening() {
-    listeningRef.current = false;
-    setListening(false);
-    setStatus("Session paused");
-
-    if (restartTimerRef.current) {
-      clearTimeout(restartTimerRef.current);
-      restartTimerRef.current = null;
-    }
-
-    if (questionTimerRef.current) {
-      clearTimeout(questionTimerRef.current);
-      questionTimerRef.current = null;
-    }
-
-    // Process any remaining speech when the user stops.
-    processQuestionBuffer();
-
-    recognitionRef.current?.stop();
-  }
-
-  function retryAnswer(item: DetectedQuestion) {
-    setQuestions((previous) =>
-      previous.map((question) =>
-        question.id === item.id
-          ? { ...question, loading: true, error: "" }
-          : question
-      )
-    );
-
-    void generateAnswer(item.question, item.id);
-  }
+      : {
+          cursor: "crosshair" as const,
+          transition:
+            "transform 0.28s cubic-bezier(.6,-0.3,.7,-0.4), opacity 0.3s",
+          transformOrigin: "center",
+        };
 
   return (
-    <main className="min-h-screen bg-[#08090c] text-white">
-      <header className="flex items-center justify-between border-b border-white/10 px-5 py-5 sm:px-8">
-        <a
-          href="/"
-          className="flex items-center gap-2 text-sm text-zinc-400 hover:text-white"
-        >
-          <ArrowLeft size={17} />
-          <span className="hidden sm:inline">Back</span>
-        </a>
+    <div
+      className={shake ? "shake" : ""}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "#0a0a0f",
+        overflow: "hidden",
+        fontFamily: "Impact, 'Arial Black', sans-serif",
+        userSelect: "none",
+      }}
+    >
+      {/* faint grid backdrop */}
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          backgroundImage:
+            "linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px)",
+          backgroundSize: "48px 48px",
+        }}
+      />
 
-        <div className="flex items-center gap-2">
-          <BrainCircuit className="text-amber-400" size={23} />
-          <span className="font-bold">
-            Hack <span className="text-amber-400">Interview</span>
+      {/* title */}
+      <h1
+        style={{
+          position: "absolute",
+          top: "6%",
+          width: "100%",
+          textAlign: "center",
+          color: "#ff2d2d",
+          letterSpacing: "0.35em",
+          fontSize: "clamp(22px, 4vw, 44px)",
+          textShadow: "0 0 18px rgba(255,45,45,0.6)",
+        }}
+      >
+        HACKINTERVIEW
+      </h1>
+
+      {/* hint */}
+      <p
+        style={{
+          position: "absolute",
+          top: "14%",
+          width: "100%",
+          textAlign: "center",
+          color: "#8a8a99",
+          fontSize: "clamp(12px, 1.4vw, 16px)",
+          letterSpacing: "0.2em",
+          fontFamily: "monospace",
+        }}
+      >
+        [ TARGET ACQUIRED — CLICK TO EXECUTE ]
+      </p>
+
+      {/* ------- stickman interviewer ------- */}
+      <svg
+        viewBox="0 0 400 520"
+        style={{
+          position: "absolute",
+          left: "50%",
+          top: "52%",
+          transform: "translate(-50%, -50%)",
+          height: "62vh",
+          filter: "drop-shadow(0 0 25px rgba(255,45,45,0.15))",
+        }}
+      >
+        {/* legs */}
+        <g onClick={() => crush("legL")} style={partStyle("legL")}>
+          <line x1="185" y1="360" x2="160" y2="480" stroke="#111" strokeWidth="14" strokeLinecap="round" />
+          <line x1="160" y1="480" x2="140" y2="482" stroke="#111" strokeWidth="12" strokeLinecap="round" />
+        </g>
+        <g onClick={() => crush("legR")} style={partStyle("legR")}>
+          <line x1="215" y1="360" x2="240" y2="480" stroke="#111" strokeWidth="14" strokeLinecap="round" />
+          <line x1="240" y1="480" x2="260" y2="482" stroke="#111" strokeWidth="12" strokeLinecap="round" />
+        </g>
+
+        {/* arms */}
+        <g onClick={() => crush("armL")} style={partStyle("armL")}>
+          <line x1="150" y1="230" x2="105" y2="320" stroke="#111" strokeWidth="13" strokeLinecap="round" />
+        </g>
+        <g onClick={() => crush("armR")} style={partStyle("armR")}>
+          {/* right arm points at you */}
+          <line x1="250" y1="230" x2="310" y2="260" stroke="#111" strokeWidth="13" strokeLinecap="round" />
+          <circle cx="318" cy="263" r="9" fill="#111" />
+        </g>
+
+        {/* torso: suit jacket + shirt + tie */}
+        <g onClick={() => crush("torso")} style={partStyle("torso")}>
+          <rect x="145" y="205" width="110" height="165" rx="14" fill="#1a1a22" stroke="#333" strokeWidth="2" />
+          {/* shirt V */}
+          <path d="M175 205 L200 255 L225 205 Z" fill="#f2f2f2" />
+          {/* tie */}
+          <path d="M194 212 L206 212 L203 232 L197 232 Z" fill="#ff2d2d" />
+          <path d="M197 232 L203 232 L210 300 L200 315 L190 300 Z" fill="#cc0000" />
+          {/* lapels */}
+          <path d="M175 205 L160 260 L185 240 Z" fill="#111" />
+          <path d="M225 205 L240 260 L215 240 Z" fill="#111" />
+          {/* pocket square */}
+          <rect x="222" y="300" width="16" height="8" fill="#f2f2f2" />
+        </g>
+
+        {/* head */}
+        <g onClick={() => crush("head")} style={partStyle("head")}>
+          <circle cx="200" cy="140" r="55" fill="#f5f5f5" stroke="#111" strokeWidth="3" />
+          {/* hair */}
+          <path d="M148 130 Q150 82 200 80 Q250 82 252 130 L252 112 Q240 95 200 94 Q160 95 148 112 Z" fill="#111" />
+          {/* angry eyes */}
+          <line x1="172" y1="132" x2="190" y2="140" stroke="#111" strokeWidth="5" strokeLinecap="round" />
+          <line x1="228" y1="132" x2="210" y2="140" stroke="#111" strokeWidth="5" strokeLinecap="round" />
+          <circle cx="182" cy="148" r="4" fill="#111" />
+          <circle cx="218" cy="148" r="4" fill="#111" />
+          {/* frown */}
+          <path d="M182 172 Q200 160 218 172" stroke="#111" strokeWidth="5" fill="none" strokeLinecap="round" />
+        </g>
+      </svg>
+
+      {/* HUD: targets remaining / entering */}
+      <p
+        style={{
+          position: "absolute",
+          bottom: "17%",
+          width: "100%",
+          textAlign: "center",
+          color: allDead ? "#ff2d2d" : "#55556a",
+          fontSize: 13,
+          letterSpacing: "0.25em",
+          fontFamily: "monospace",
+        }}
+      >
+        {allDead
+          ? "TARGET NEUTRALIZED. ENTERING HACKINTERVIEW..."
+          : `TARGETS REMAINING: ${TOTAL_PARTS - crushed.size} — ${
+              (Object.keys(PART_LABEL) as PartId[])
+                .filter((p) => !crushed.has(p))
+                .map((p) => PART_LABEL[p])
+                .join(" | ")
+            }`}
+      </p>
+
+      {/* skip button */}
+      <button
+        onClick={() => router.push("/interview")}
+        style={{
+          position: "absolute",
+          bottom: "10%",
+          left: "50%",
+          transform: "translateX(-50%)",
+          background: "none",
+          border: "1px solid #333344",
+          color: "#777788",
+          padding: "8px 24px",
+          borderRadius: 8,
+          letterSpacing: "0.25em",
+          fontSize: 12,
+          cursor: "pointer",
+          fontFamily: "monospace",
+        }}
+      >
+        SKIP →
+      </button>
+
+      {/* ------- blood splats ------- */}
+      {splats.map((s) => (
+        <div key={s.id}>
+          <div
+            style={{
+              position: "absolute",
+              left: `${s.x}vw`,
+              top: `${s.y}vh`,
+              width: s.size,
+              height: s.size * (0.7 + Math.random() * 0.6),
+              background:
+                "radial-gradient(circle, #b30000 0%, #8a0000 55%, rgba(120,0,0,0.85) 80%, transparent 100%)",
+              borderRadius: `${40 + Math.random() * 40}% ${50 + Math.random() * 40}% ${45 + Math.random() * 40}% ${50 + Math.random() * 40}%`,
+              transform: "scale(0) rotate(0deg)",
+              animation: `splat ${s.duration}s ${s.delay}s cubic-bezier(.2,1.4,.4,1) forwards`,
+              pointerEvents: "none",
+              mixBlendMode: "screen",
+            }}
+          />
+          {s.drip && (
+            <div
+              style={{
+                position: "absolute",
+                left: `${s.x}vw`,
+                top: `${s.y}vh`,
+                width: 4 + Math.random() * 5,
+                height: s.size * 1.6,
+                background: "linear-gradient(#8a0000, transparent)",
+                borderRadius: 4,
+                animation: `drip ${1.2 + Math.random()}s ${s.delay + s.duration}s ease-in forwards`,
+                opacity: 0,
+                pointerEvents: "none",
+              }}
+            />
+          )}
+        </div>
+      ))}
+
+      {/* ------- the phrase ------- */}
+      {phrase && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            pointerEvents: "none",
+            zIndex: 10,
+          }}
+        >
+          <span
+            style={{
+              color: "#ff1a1a",
+              fontSize: "clamp(36px, 8vw, 110px)",
+              letterSpacing: "0.08em",
+              textShadow:
+                "0 0 12px #ff0000, 0 0 40px #990000, 3px 3px 0 #4d0000",
+              transform: "scale(0)",
+              animation: "slam 0.45s 0.15s cubic-bezier(.2,1.8,.4,1) forwards",
+            }}
+          >
+            F*ck This Rat Sh*t
           </span>
         </div>
+      )}
 
-        <div className="flex items-center gap-2 text-xs text-zinc-400">
-          <span
-            className={`h-2 w-2 rounded-full ${
-              listening ? "animate-pulse bg-green-400" : "bg-zinc-600"
-            }`}
-          />
-          {listening ? "Live" : "Offline"}
-        </div>
-      </header>
+      {/* footer */}
+      <footer
+        style={{
+          position: "absolute",
+          bottom: "4%",
+          width: "100%",
+          textAlign: "center",
+          color: "#e8e8f0",
+          fontSize: "clamp(18px, 2.6vw, 34px)",
+          letterSpacing: "0.3em",
+          textShadow: "0 0 14px rgba(255,255,255,0.25)",
+        }}
+      >
+        SHOOT THE INTERVIEWER
+      </footer>
 
-      <section className="mx-auto max-w-7xl px-4 py-8 sm:px-8 sm:py-12">
-        <div className="mb-8">
-          <p className="text-sm font-medium text-amber-400">
-            LIVE AUDIO SESSION
-          </p>
-
-          <h1 className="mt-3 text-3xl font-bold sm:text-4xl">
-            Interview workspace
-          </h1>
-
-          <p className="mt-3 max-w-2xl text-sm leading-6 text-zinc-400 sm:text-base">
-            Transcribe speech, identify likely questions, and generate
-            suggested answers for mock interviews and authorized practice.
-          </p>
-        </div>
-
-        <div className="grid gap-5 lg:grid-cols-[0.9fr_1.1fr]">
-          <section className="rounded-2xl border border-white/10 bg-[#101116] p-5 sm:p-7">
-            <div className="flex items-center gap-3">
-              <div className="rounded-xl bg-amber-400/10 p-3 text-amber-400">
-                <Mic size={23} />
-              </div>
-
-              <div>
-                <h2 className="font-semibold">Audio controls</h2>
-                <p className="mt-1 text-sm text-zinc-500">{status}</p>
-              </div>
-            </div>
-
-            <div className="my-8 flex min-h-40 flex-col items-center justify-center rounded-2xl border border-white/5 bg-black/20 p-5">
-              <div
-                className={`mb-4 flex h-16 w-16 items-center justify-center rounded-full ${
-                  listening
-                    ? "bg-amber-400/15 text-amber-400"
-                    : "bg-white/5 text-zinc-500"
-                }`}
-              >
-                {listening ? (
-                  <Waves size={30} />
-                ) : (
-                  <MicOff size={30} />
-                )}
-              </div>
-
-              <p className="text-center font-medium">
-                {listening ? "Listening to microphone" : "Ready when you are"}
-              </p>
-
-              <p className="mt-2 text-center text-xs leading-5 text-zinc-500">
-                {listening
-                  ? "Speak clearly and pause briefly after a question."
-                  : "Allow microphone access when your browser asks."}
-              </p>
-            </div>
-
-            {!listening ? (
-              <button
-                onClick={startListening}
-                disabled={!supported}
-                className="flex w-full items-center justify-center gap-2 rounded-xl bg-amber-400 px-5 py-4 font-semibold text-black hover:bg-amber-300 disabled:opacity-40"
-              >
-                <Radio size={19} />
-                Start listening
-              </button>
-            ) : (
-              <button
-                onClick={stopListening}
-                className="flex w-full items-center justify-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-5 py-4 font-semibold text-red-300 hover:bg-red-500/20"
-              >
-                <CircleStop size={19} />
-                Stop listening
-              </button>
-            )}
-
-            {error && (
-              <div
-                role="alert"
-                className="mt-4 flex items-start gap-2 text-sm leading-6 text-red-400"
-              >
-                <AlertCircle size={17} className="mt-1 shrink-0" />
-                <span>{error}</span>
-              </div>
-            )}
-
-            {!supported && (
-              <p className="mt-4 text-sm leading-6 text-zinc-400">
-                This browser does not expose the Web Speech API.
-              </p>
-            )}
-
-            <div className="mt-5 flex items-start gap-2 text-xs leading-5 text-zinc-500">
-              <ShieldCheck size={16} className="mt-0.5 shrink-0" />
-              AI requests are sent to your configured server endpoint.
-              Get consent before capturing another person's speech.
-            </div>
-          </section>
-
-          <div className="flex flex-col gap-5">
-            <section className="rounded-2xl border border-white/10 bg-[#101116] p-5 sm:p-7">
-              <div className="mb-5 flex items-center justify-between gap-3">
-                <h2 className="font-semibold">Live transcript</h2>
-                <Volume2 size={18} className="text-zinc-500" />
-              </div>
-
-              <div className="min-h-36 whitespace-pre-wrap break-words text-sm leading-7 text-zinc-300">
-                {transcript || (
-                  <span className="text-zinc-600">
-                    Recognized speech will appear here automatically...
-                  </span>
-                )}
-
-                {currentSpeech && (
-                  <span className="text-amber-300">
-                    {" "}{currentSpeech}
-                  </span>
-                )}
-              </div>
-            </section>
-
-            <section className="flex-1 rounded-2xl border border-white/10 bg-[#101116] p-5 sm:p-7">
-              <div className="mb-5 flex items-center justify-between gap-3">
-                <h2 className="font-semibold">Detected questions & answers</h2>
-
-                <span className="rounded-full bg-white/5 px-3 py-1 text-xs text-zinc-400">
-                  {questions.length}
-                </span>
-              </div>
-
-              {questions.length === 0 ? (
-                <div className="flex min-h-36 flex-col items-center justify-center text-center">
-                  <BrainCircuit size={28} className="text-zinc-600" />
-
-                  <p className="mt-3 text-sm text-zinc-400">
-                    Waiting for a likely question
-                  </p>
-
-                  <p className="mt-2 max-w-xs text-xs leading-5 text-zinc-600">
-                    When a likely question is detected, the app will request
-                    a suggested answer from your AI backend.
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  {questions.map((item) => (
-                    <article
-                      key={item.id}
-                      className="rounded-xl border border-white/10 bg-black/20 p-4 sm:p-5"
-                    >
-                      <div className="flex items-start gap-3">
-                        <CheckCircle2
-                          size={18}
-                          className="mt-1 shrink-0 text-amber-400"
-                        />
-
-                        <div className="min-w-0 flex-1">
-                          <p className="text-xs font-semibold uppercase tracking-wider text-amber-400">
-                            Detected question
-                          </p>
-
-                          <p className="mt-2 break-words text-sm leading-6 text-zinc-200">
-                            {item.question}
-                          </p>
-                        </div>
-                      </div>
-
-                      <div className="mt-4 border-t border-white/10 pt-4">
-                        <div className="flex items-center gap-2">
-                          <BrainCircuit
-                            size={17}
-                            className="shrink-0 text-amber-400"
-                          />
-
-                          <h3 className="text-sm font-semibold">
-                            Suggested answer
-                          </h3>
-                        </div>
-
-                        {item.loading ? (
-                          <div className="mt-4 flex items-center gap-3 text-sm text-zinc-400">
-                            <Loader2
-                              size={18}
-                              className="animate-spin text-amber-400"
-                            />
-                            Generating your answer...
-                          </div>
-                        ) : item.error ? (
-                          <div className="mt-3">
-                            <p className="text-sm leading-6 text-red-400">
-                              {item.error}
-                            </p>
-
-                            <button
-                              onClick={() => retryAnswer(item)}
-                              className="mt-3 rounded-lg border border-amber-400/30 px-4 py-2 text-sm font-medium text-amber-300 hover:bg-amber-400/10"
-                            >
-                              Try again
-                            </button>
-                          </div>
-                        ) : (
-                          <p className="mt-3 whitespace-pre-wrap break-words text-sm leading-7 text-zinc-300">
-                            {item.answer}
-                          </p>
-                        )}
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              )}
-            </section>
-          </div>
-        </div>
-      </section>
-    </main>
+      {/* keyframes + shake */}
+      <style>{`
+        @keyframes splat {
+          0% { transform: scale(0) rotate(0deg); opacity: 1; }
+          70% { transform: scale(1.15) rotate(20deg); opacity: 1; }
+          100% { transform: scale(1) rotate(15deg); opacity: 0.92; }
+        }
+        @keyframes drip {
+          0% { opacity: 0; transform: translateY(0) scaleY(0.3); }
+          20% { opacity: 1; transform: translateY(0) scaleY(1); }
+          100% { opacity: 0; transform: translateY(90px) scaleY(1); }
+        }
+        @keyframes slam {
+          0% { transform: scale(0) rotate(-14deg); }
+          60% { transform: scale(1.25) rotate(3deg); }
+          100% { transform: scale(1) rotate(0deg); }
+        }
+        .shake { animation: shakeAnim 0.5s linear; }
+        @keyframes shakeAnim {
+          0%, 100% { transform: translate(0, 0); }
+          15% { transform: translate(-14px, 8px) rotate(-0.6deg); }
+          30% { transform: translate(12px, -10px) rotate(0.6deg); }
+          45% { transform: translate(-10px, -6px); }
+          60% { transform: translate(9px, 7px) rotate(-0.4deg); }
+          75% { transform: translate(-5px, 3px); }
+          90% { transform: translate(4px, -2px); }
+        }
+      `}</style>
+    </div>
   );
 }

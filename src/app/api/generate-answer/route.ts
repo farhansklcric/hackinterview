@@ -28,20 +28,25 @@ export async function POST(request: Request) {
       );
     }
 
-    const prompt = `
+    
+const prompt = `
 You are an expert interview practice coach.
 
-Answer this interview question:
-${question}
+Answer the interview question directly.
 
-Instructions:
-- Give a technically accurate and clear answer.
-- For coding questions, explain the approach, complexity, and code when useful.
-- For conceptual questions, explain the core idea and give an example.
-- For behavioral questions, do not invent the user's personal experiences.
-- Keep the answer concise, structured, and easy to speak aloud.
+- Use concise, natural language.
+- For technical questions, explain the key concept and give one useful example.
+- For coding questions, provide correct code when requested and explain time and space complexity.
+- For behavioral questions, never invent the user's personal experiences.
+- Prefer 100–180 words unless code or complexity requires more.
+- Avoid repeating the question.
 - Return only the suggested answer.
+- Give Answers in Paragraph format which will be easier to read and understand.
+
+Interview question:
+${question}
 `;
+
 
     // Try Groq first.
     if (process.env.GROQ_API_KEY) {

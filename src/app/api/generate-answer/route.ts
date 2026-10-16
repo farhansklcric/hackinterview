@@ -47,11 +47,10 @@ Instructions:
     if (process.env.GROQ_API_KEY) {
       try {
         const groq = new Groq({
-          apiKey: process.env.GROQ_API_KEY,
-          timeout: 15000,
-          maxRetries: 0,
-        });
-
+        apiKey: process.env.GROQ_API_KEY,
+        timeout: 7000,
+        maxRetries: 0,
+});
         const result = await groq.chat.completions.create({
           model: "openai/gpt-oss-120b",
           messages: [
@@ -66,7 +65,7 @@ Instructions:
             },
           ],
           temperature: 0.3,
-          max_tokens: 700,
+          max_tokens: 450,
         });
 
         const answer =

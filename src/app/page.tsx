@@ -58,10 +58,10 @@ export default function LoadingScreen() {
   const beginExit = useCallback(() => {
     if (redirectTimer.current) return; // guard double-calls
     setLeaving(true);
-    redirectTimer.current = setTimeout(
-      () => router.push("/interview"),
-      1500
-    );
+   redirectTimer.current = setTimeout(
+  () => router.push("/login"),
+  1500
+);
   }, [router]);
 
   /* all parts destroyed -> brief beat, then blood exit */
